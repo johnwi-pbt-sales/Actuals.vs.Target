@@ -1,0 +1,260 @@
+---
+title: "Actual vs Target"
+output: 
+  flexdashboard::flex_dashboard
+runtime: shiny
+---
+
+```{r setup, include=FALSE}
+library(flexdashboard)
+library(shiny)
+library(readr)
+library(dplyr)
+library(tidyr)
+library(knitr)
+library(ggplot2)
+library(DT)
+library(rmarkdown)
+library(plotly)
+
+```
+
+Inputs {.sidebar}
+-----------------------------------------------------------------------
+```{r}
+
+
+
+
+inputPanel(
+  fileInput('file1', 'Choose Sale file to upload',
+                accept = c(
+                  'text/csv',
+                  'text/comma-separated-values',
+                  'text/tab-separated-values',
+                  'text/plain',
+                  '.csv',
+                  '.tsv'
+                )
+      ),
+   fileInput('file2', 'Choose Rep file to upload',
+                accept = c(
+                  'text/csv',
+                  'text/comma-separated-values',
+                  'text/tab-separated-values',
+                  'text/plain',
+                  '.csv',
+                  '.tsv'
+                )
+      )
+)
+
+
+dat <-
+reactive({
+  
+  inFile <- input$file1
+
+  if (is.null(inFile))
+      return(NULL)
+  
+  dat <-  read_csv(inFile$datapath)
+
+  names(dat) <- gsub(" ", "", names(dat))
+  
+  dat <- dat[,c("SalesRep", "Service", "BudgetedYTDNB", "NBActual", "BudgetedYTDEB", "EBActual")]
+  
+  dat <- dat %>% rename(NBTarget = BudgetedYTDNB, EBTarget = BudgetedYTDEB)
+  
+  temp <- factor(dat$Service)
+  
+  levels(temp) <- c("PBTB", "PBTC", "PBTT")
+  
+  dat$Service <- as.character(temp)
+  
+  dat
+})
+
+
+inputPanel(
+radioButtons('actual', 'Actual/Percent:', c("Actual", "Percent")),
+selectInput("service", "Services", c("PBTB", "PBTC", "PBTT"), selected = "PBTT", multiple= FALSE),
+selectInput("measures", "Measures", c( "NBTarget_NBActual", "EBTarget_EBActual"),
+                multiple=FALSE),
+selectInput("report1", "Report1", c( "AKL", "WLG", "CHC", "National", "Corporate", "Regional")),
+selectInput("report2", "Report2", c("None" = " ", "AM" = "AM", "BDM" = "BDM", "AM/BDM" = "AM/BDM"))
+)
+
+
+
+newDat <- reactive({
+  
+  
+  inFile <- input$file2
+
+  if (is.null(inFile))
+      return(NULL)
+
+  reps <- read_csv(inFile$datapath)
+  reps$Report1 <- toupper(reps$Report1)
+  reps$Report2 <- toupper(reps$Report2)
+  reps$Report3 <- toupper(reps$Report3)
+
+  
+  measures <- switch (input$measures,"NBTarget_NBActual" = "NB", "EBTarget_EBActual" = "EB"  )
+  
+  report <- toupper(paste(input$report1, input$report2, sep = " "))
+  
+  reps <- reps %>% filter(grepl(measures, EB.NB) & (grepl(trimws(report), Report1) | grepl(trimws(report), Report2))) 
+  
+  dat()[,c('SalesRep','Service',  unlist(strsplit(input$measures, "_")))] %>% 
+    filter(SalesRep %in%  reps$`Sales Rep` )  %>%
+    filter(Service ==  input$service) 
+})
+
+renderUI({
+  req(dat())
+  
+  selectInput('members', 'Members', sort(unique(dat()$SalesRep)), 
+              selected = sort(unique(newDat()$SalesRep)), multiple= TRUE)
+})
+
+
+
+inputPanel(
+  downloadButton('downloadData', "Download Table")
+)
+ 
+reportdf <- 
+reactive({
+  
+  dat <- 
+  dat()[,c('SalesRep','Service',  unlist(strsplit(input$measures, "_")))] %>% 
+    filter(SalesRep %in%  input$members )  %>%
+    filter(Service ==  input$service) %>% data.frame()
+    
+    if(input$actual == "Percent") {
+      dat$Percent <- round(dat[,grep("Actual", names(dat))]/dat[,grep("Target", names(dat))], 4)
+      dat$Percent[dat$Percent == Inf] <-0
+      dat$Percent[is.na(dat$Percent)] <-0
+      
+      dat <- dat[, -grep("Actual", names(dat))]
+      dat <- dat[, -grep("Target", names(dat))]
+      
+    }
+  
+  dat$SalesRep <- as.factor(dat$SalesRep)
+  dat
+})
+
+
+```
+
+
+Column {.tabset .tabset-fade}
+-----------------------------------------------------------------------
+### Table
+```{r}
+
+
+tableReport <- reactive({
+  
+   
+  
+  dat <- reportdf() %>% tbl_df()
+
+   if(input$actual == "Percent") {
+     
+      Percent <- dat %>% select(SalesRep, Service, Percent) %>% spread(Service, Percent)
+      names(Percent)[-1] <- paste0("Percent", names(Percent)[-1]) 
+
+      tableReport  <- Percent
+ 
+     
+   } else {
+      if(input$measures == "NBTarget_NBActual"){
+        NBTarget <- dat %>% select(SalesRep, Service, NBTarget) %>% spread(Service, NBTarget)
+        NBActual <- dat %>% select(SalesRep, Service, NBActual) %>% spread(Service, NBActual)
+     
+        names(NBTarget)[-1] <- paste0("NBTarget", names(NBTarget)[-1]) 
+        names(NBActual)[-1] <- paste0("NBActual", names(NBActual)[-1]) 
+    
+        
+        tableReport <- NBTarget %>% left_join(NBActual) 
+        
+      } else {
+        EBTarget <- dat %>% select(SalesRep, Service, EBTarget) %>% spread(Service, EBTarget)
+        EBActual <- dat %>% select(SalesRep, Service, EBActual) %>% spread(Service, EBActual)
+      
+        names(EBTarget)[-1] <- paste0("EBTarget", names(EBTarget)[-1]) 
+        names(EBActual)[-1] <- paste0("EBActual", names(EBActual)[-1]) 
+        
+        tableReport <-EBTarget %>% left_join(EBActual)
+      }
+  
+   }
+  
+      
+   tableReport
+})
+
+
+renderDataTable({
+ d<- datatable(tableReport(), options = list(pageLength = 1000, dom = "t"), rownames = FALSE,
+                class = "table-condensed") 
+ 
+ if(input$actual == "Percent")
+  d %>% formatPercentage(2, digits = 2)  
+ else 
+  d %>% formatCurrency(2:3)
+  
+})
+
+
+output$downloadData <- downloadHandler(
+  filename = function() { 
+	 paste("Table.csv", sep = "") 
+ },
+  content = function(file) {
+    write.csv(tableReport, file)
+  }
+)
+
+```
+
+
+
+### BarChart
+
+```{r}
+
+renderPlotly({
+   # Tidy the data and create a barplot by Rep comparing Actual to Target
+p <- reportdf() %>% select(-Service) %>% 
+  gather(Measures, Value, -SalesRep) %>% 
+  ggplot(aes(x = SalesRep, y = Value, fill = Measures)) + 
+  geom_bar(stat = "identity", position = "dodge") + 
+  theme_bw()  +
+  #theme(axis.text.x = element_text(angle = 60, hjust = 1)) + 
+  scale_y_continuous(labels= scales::comma)
+
+if(input$actual == "Percent")  {
+  p <- reportdf() %>% select(-Service) %>% 
+    gather(Measures, Value, -SalesRep) %>%
+    ggplot(aes(x = SalesRep, y = Value)) + 
+    geom_bar(stat = "identity") + 
+    ylab("Percent")+ theme_bw()  +
+    scale_y_continuous(labels= scales::percent)
+}
+
+if(input$report1 == "National")
+  p <- p + coord_flip()  
+
+
+ggplotly(p) 
+})
+
+```
+
+
+
